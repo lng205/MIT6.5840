@@ -1,0 +1,19 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build-plugin",
+      "type": "shell",
+      // !! add -gcflags=all='-N -l' to ensure the plugin uses the same build flags as the main program
+      "command": "cd ${workspaceFolder}/src && go build -buildmode=plugin -gcflags=all='-N -l' -o mrapps/wc.so mrapps/wc.go",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    }
+  ]
+}

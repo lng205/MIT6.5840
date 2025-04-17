@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "go",
+      "request": "launch",
+      "name": "Debug MRSequential",
+      "program": "${workspaceFolder}/src/main/mrsequential.go",
+      "cwd": "${workspaceFolder}/src/main",
+      "args": ["../mrapps/wc.so", "pg*.txt"],
+      "debugAdapter": "dlv-dap",
+      "preLaunchTask": "build-plugin"
+    }
+  ]
+}
