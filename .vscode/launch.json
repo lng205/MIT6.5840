@@ -7,8 +7,8 @@
       "name": "Debug MRSequential",
       "program": "${workspaceFolder}/src/main/mrsequential.go",
       "cwd": "${workspaceFolder}/src/main",
-      "args": ["../mrapps/wc.so", "pg*.txt"],
-      "debugAdapter": "dlv-dap",
+      "args": ["../mrapps/wc.so", "pg-being_ernest.txt", "pg-dorian_gray.txt", "pg-sherlock_holmes.txt"],
+      // "debugAdapter": "dlv-dap",
       "preLaunchTask": "build-plugin"
     }
   ]
