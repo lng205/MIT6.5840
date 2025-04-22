@@ -20,7 +20,8 @@ type TaskType int
 const (
 	MapTask TaskType = iota
 	ReduceTask
-	Done
+	NoTask
+	End
 )
 
 type TaskArgs struct {

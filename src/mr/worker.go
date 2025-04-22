@@ -30,7 +30,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	id := registerWorker()
-	log.Printf("Worker %d registered", id)
+	// log.Printf("Worker %d registered", id)
 	args := TaskArgs{id}
 
 	for {
@@ -61,11 +61,15 @@ func Worker(mapf func(string, string) []KeyValue,
 				fmt.Fprintf(file, "%v %v\n", k, result)
 			}
 			file.Close()
-			log.Printf("Worker %d completed reduce task %d, wrote to %s", id, reply.TaskID, fname)
+			// log.Printf("Worker %d completed reduce task %d, wrote to %s",
+			// 	id, reply.TaskID, fname)
 			call("Coordinator.CompleteTask", &args, &struct{}{})
 
-		case Done:
+		case NoTask:
 			time.Sleep(time.Second)
+
+		case End:
+			return
 
 		default:
 			log.Fatalf("Worker %d received unknown task type: %v", id, reply.TaskType)
@@ -117,10 +121,8 @@ func encodeIntermediate(kva []KeyValue, nReduce int, mapID int) {
 		counts[reduceID]++
 	}
 
-	// Close all files
-	for i, file := range files {
+	for _, file := range files {
 		file.Close()
-		log.Printf("Worker %d wrote %d key-value pairs to mr-%d-%d", mapID, counts[i], mapID, i)
 	}
 }
 
@@ -161,7 +163,6 @@ func readIntermediate(nMap int, reduceID int) []KeyValue {
 		}
 
 		dec := json.NewDecoder(file)
-		count := 0
 		for {
 			var kv KeyValue
 			if err := dec.Decode(&kv); err != nil {
@@ -171,10 +172,8 @@ func readIntermediate(nMap int, reduceID int) []KeyValue {
 				break
 			}
 			kva = append(kva, kv)
-			count++
 		}
 		file.Close()
-		log.Printf("Worker %d read %d key-value pairs from %s", reduceID, count, filename)
 	}
 	return kva
 }

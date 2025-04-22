@@ -13,15 +13,20 @@ import (
 )
 
 type Coordinator struct {
-	mu sync.Mutex
-
-	mapTasks   map[int]*task
-	mapAllDone bool
-
+	mu          sync.Mutex
+	phase       coordinatorPhase
+	mapTasks    map[int]*task
 	reduceTasks map[int]*task
-
-	workers map[int]*worker
+	workers     map[int]*worker
 }
+
+type coordinatorPhase int
+
+const (
+	mapPhase coordinatorPhase = iota
+	reducePhase
+	endPhase
+)
 
 type task struct {
 	fileName string
@@ -46,7 +51,6 @@ type worker struct {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-
 	mp := make(map[int]*task)
 	for i, file := range files {
 		mp[i] = &task{file, idle}
@@ -58,6 +62,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 
 	c := Coordinator{
+		phase:       mapPhase,
 		mapTasks:    mp,
 		reduceTasks: rd,
 		workers:     make(map[int]*worker),
@@ -65,7 +70,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	go checkWorkerTimeout(&c)
 	c.server()
-	log.Println("Coordinator started")
+	// log.Println("Coordinator started")
 	return &c
 }
 
@@ -93,7 +98,7 @@ func (c *Coordinator) Done() bool {
 	}
 
 	c.cleanUpIntermediateFiles()
-	log.Println("Coordinator done")
+	// log.Println("Coordinator done")
 	return true
 }
 
@@ -101,7 +106,7 @@ func (c *Coordinator) Register(args *TaskArgs, reply *RegisterReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	workerID := len(c.workers)
-	c.workers[workerID] = &worker{Done, -1, time.Now()}
+	c.workers[workerID] = &worker{NoTask, -1, time.Now()}
 	reply.WorkerID = workerID
 	return nil
 }
@@ -115,37 +120,46 @@ func (c *Coordinator) RequestTask(args *TaskArgs, reply *TaskReply) error {
 		return errors.New("worker not registered")
 	}
 
-	if worker.taskType != Done {
-		return errors.New("worker is busy")
+	if worker.taskType != NoTask {
+		reply.TaskType = NoTask
+		return nil
 	}
 
-	if !c.mapAllDone {
+	switch c.phase {
+	case mapPhase:
 		// map tasks
 		taskID := getTask(c.mapTasks)
-
-		reply.TaskType = MapTask
-		reply.TaskID = taskID
-		reply.FileName = c.mapTasks[taskID].fileName
-		reply.NReduce = len(c.reduceTasks)
+		if taskID == -1 {
+			reply.TaskType = NoTask
+			break
+		}
 
 		worker.taskType = MapTask
 		worker.taskID = taskID
 		worker.started = time.Now()
 
-	} else {
+		reply.TaskType = MapTask
+		reply.TaskID = taskID
+		reply.FileName = c.mapTasks[taskID].fileName
+		reply.NReduce = len(c.reduceTasks)
+		reply.NMap = len(c.mapTasks)
+	case reducePhase:
 		// reduce tasks
 		taskID := getTask(c.reduceTasks)
 		if taskID == -1 {
-			return errors.New("no reduce tasks available")
+			reply.TaskType = NoTask
+			break
 		}
-
-		reply.TaskType = ReduceTask
-		reply.TaskID = taskID
-		reply.NMap = len(c.mapTasks)
 
 		worker.taskType = ReduceTask
 		worker.taskID = taskID
 		worker.started = time.Now()
+
+		reply.TaskType = ReduceTask
+		reply.TaskID = taskID
+		reply.NMap = len(c.mapTasks)
+	case endPhase:
+		reply.TaskType = End
 	}
 
 	return nil
@@ -168,29 +182,35 @@ func (c *Coordinator) CompleteTask(args *TaskArgs, reply *struct{}) error {
 
 	switch worker.taskType {
 	case MapTask:
-		log.Printf("Worker %d completed map task %d (file: %s)", args.WorkerID, worker.taskID, c.mapTasks[worker.taskID].fileName)
 		c.mapTasks[worker.taskID].status = completed
-		c.checkMapAllDone()
 	case ReduceTask:
-		log.Printf("Worker %d completed reduce task %d", args.WorkerID, worker.taskID)
 		c.reduceTasks[worker.taskID].status = completed
-	case Done:
-		return errors.New("worker already completed task")
+	case NoTask:
+		return nil
 	default:
 		return errors.New("unknown task type")
 	}
 
-	worker.taskType = Done
+	worker.taskType = NoTask
+	c.updatePhase()
 	return nil
 }
 
-func (c *Coordinator) checkMapAllDone() {
-	for _, task := range c.mapTasks {
-		if task.status != completed {
-			return
+func (c *Coordinator) updatePhase() {
+	allCompleted := func(tasks map[int]*task) bool {
+		for _, task := range tasks {
+			if task.status != completed {
+				return false
+			}
 		}
+		return true
 	}
-	c.mapAllDone = true
+
+	if c.phase == mapPhase && allCompleted(c.mapTasks) {
+		c.phase = reducePhase
+	} else if c.phase == reducePhase && allCompleted(c.reduceTasks) {
+		c.phase = endPhase
+	}
 }
 
 func checkWorkerTimeout(c *Coordinator) {
@@ -198,8 +218,17 @@ func checkWorkerTimeout(c *Coordinator) {
 		c.mu.Lock()
 		for _, worker := range c.workers {
 			if time.Since(worker.started) > 10*time.Second {
-				log.Println("Worker timed out:", worker.taskID)
-				worker.taskType = Done
+
+				switch worker.taskType {
+				case MapTask:
+					c.mapTasks[worker.taskID].status = idle
+				case ReduceTask:
+					c.reduceTasks[worker.taskID].status = idle
+				}
+
+				worker.taskType = NoTask
+				worker.taskID = -1
+
 			}
 		}
 		c.mu.Unlock()
