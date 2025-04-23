@@ -1,13 +1,14 @@
 package mr
 
 import (
-	"encoding/json"
+	"bufio"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
 	"net/rpc"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -29,8 +30,7 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
-	id := registerWorker()
-	// log.Printf("Worker %d registered", id)
+	id, nMap, nReduce := registerWorker()
 	args := TaskArgs{id}
 
 	for {
@@ -39,30 +39,15 @@ func Worker(mapf func(string, string) []KeyValue,
 			log.Fatalf("Worker %d failed to request task", id)
 		}
 
+		// log.Printf("Worker %d received task %d of type %d", id, reply.TaskID, reply.TaskType)
+
 		switch reply.TaskType {
 		case MapTask:
-			content := readContent(reply.FileName)
-			kva := mapf(reply.FileName, content)
-			encodeIntermediate(kva, reply.NReduce, reply.TaskID)
+			doMap(reply.FileName, reply.TaskID, nReduce, mapf)
 			call("Coordinator.CompleteTask", &args, &struct{}{})
 
 		case ReduceTask:
-			kva := readIntermediate(reply.NMap, reply.TaskID)
-			m := groupByKey(kva)
-
-			fname := fmt.Sprintf("mr-out-%d", reply.TaskID)
-			file, err := os.Create(fname)
-			if err != nil {
-				log.Fatalf("Worker %d cannot create %v: %v", id, fname, err)
-			}
-
-			for k, v := range m {
-				result := reducef(k, v)
-				fmt.Fprintf(file, "%v %v\n", k, result)
-			}
-			file.Close()
-			// log.Printf("Worker %d completed reduce task %d, wrote to %s",
-			// 	id, reply.TaskID, fname)
+			doReduce(reply.TaskID, id, nMap, reducef)
 			call("Coordinator.CompleteTask", &args, &struct{}{})
 
 		case NoTask:
@@ -70,9 +55,6 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		case End:
 			return
-
-		default:
-			log.Fatalf("Worker %d received unknown task type: %v", id, reply.TaskType)
 		}
 	}
 }
@@ -85,7 +67,8 @@ func call(rpcname string, args any, reply any) bool {
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		// log.Fatal("dialing:", err)
+		os.Exit(1)
 	}
 	defer c.Close()
 
@@ -96,6 +79,31 @@ func call(rpcname string, args any, reply any) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+func registerWorker() (int, int, int) {
+	args := struct{}{}
+	reply := RegisterReply{}
+	if ok := call("Coordinator.Register", &args, &reply); !ok {
+		log.Fatalf("Worker failed to register")
+	}
+	return reply.WorkerID, reply.NMap, reply.NReduce
+}
+
+func doMap(filename string, taskID, nReduce int, mapf func(string, string) []KeyValue) {
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("Worker %d cannot open %v: %v", taskID, filename, err)
+	}
+
+	content, err := io.ReadAll(file)
+	if err != nil {
+		log.Fatalf("Worker %d cannot read %v: %v", taskID, filename, err)
+	}
+	file.Close()
+
+	kva := mapf(filename, string(content))
+	encodeIntermediate(kva, nReduce, taskID)
 }
 
 func encodeIntermediate(kva []KeyValue, nReduce int, mapID int) {
@@ -111,14 +119,9 @@ func encodeIntermediate(kva []KeyValue, nReduce int, mapID int) {
 	}
 
 	// Write each key-value pair to the appropriate reduce task's file
-	counts := make([]int, nReduce)
 	for _, kv := range kva {
 		reduceID := ihash(kv.Key) % nReduce
-		enc := json.NewEncoder(files[reduceID])
-		if err := enc.Encode(&kv); err != nil {
-			log.Fatalf("Worker %d cannot encode %v: %v", mapID, kv, err)
-		}
-		counts[reduceID]++
+		fmt.Fprintf(files[reduceID], "%s %s\n", kv.Key, kv.Value)
 	}
 
 	for _, file := range files {
@@ -126,62 +129,51 @@ func encodeIntermediate(kva []KeyValue, nReduce int, mapID int) {
 	}
 }
 
-func registerWorker() int {
-	args := struct{}{}
-	reply := RegisterReply{}
-	if ok := call("Coordinator.Register", &args, &reply); !ok {
-		log.Fatalf("Worker failed to register")
-	}
-	return reply.WorkerID
-}
-
-func readContent(filename string) string {
-	file, err := os.Open(filename)
+func doReduce(taskID, workerID, nMap int, reducef func(string, []string) string) {
+	fname := fmt.Sprintf("mr-out-%d", taskID)
+	file, err := os.Create(fname)
 	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+		log.Fatalf("Worker %d cannot create %v: %v", workerID, fname, err)
 	}
 	defer file.Close()
 
-	content, err := io.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", filename)
+	kva := readIntermediate(nMap, taskID)
+	m := make(map[string][]string)
+	for _, kv := range kva {
+		m[kv.Key] = append(m[kv.Key], kv.Value)
 	}
-	return string(content)
+
+	for k, v := range m {
+		result := reducef(k, v)
+		fmt.Fprintf(file, "%s %s\n", k, result)
+	}
 }
 
-func readIntermediate(nMap int, reduceID int) []KeyValue {
+func readIntermediate(nMap, reduceID int) []KeyValue {
 	kva := []KeyValue{}
 	// Read intermediate files from all map tasks for this reduce task
 	for mapID := range nMap {
 		filename := fmt.Sprintf("mr-%d-%d", mapID, reduceID)
 		file, err := os.Open(filename)
 		if err != nil {
-			if !os.IsNotExist(err) {
-				log.Printf("Worker %d cannot open %v: %v", reduceID, filename, err)
-			}
+			log.Printf("Worker cannot open %v: %v", filename, err)
 			continue
 		}
 
-		dec := json.NewDecoder(file)
-		for {
-			var kv KeyValue
-			if err := dec.Decode(&kv); err != nil {
-				if err != io.EOF {
-					log.Printf("Worker %d cannot decode %v: %v", reduceID, filename, err)
-				}
-				break
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Text()
+			parts := strings.SplitN(line, " ", 2)
+			if len(parts) != 2 {
+				log.Printf("Worker %d invalid line format in %v: %v", reduceID, filename, line)
+				continue
 			}
-			kva = append(kva, kv)
+			kva = append(kva, KeyValue{Key: parts[0], Value: parts[1]})
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("Worker %d error scanning %v: %v", reduceID, filename, err)
 		}
 		file.Close()
 	}
 	return kva
-}
-
-func groupByKey(kva []KeyValue) map[string][]string {
-	m := make(map[string][]string)
-	for _, kv := range kva {
-		m[kv.Key] = append(m[kv.Key], kv.Value)
-	}
-	return m
 }

@@ -13,8 +13,9 @@ import (
 )
 
 type Coordinator struct {
-	mu          sync.Mutex
-	phase       coordinatorPhase
+	mu    sync.Mutex
+	phase coordinatorPhase
+	// TODO: add a task queue for finding idle tasks and update phase
 	mapTasks    map[int]*task
 	reduceTasks map[int]*task
 	workers     map[int]*worker
@@ -91,15 +92,7 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	for _, task := range c.reduceTasks {
-		if task.status != completed {
-			return false
-		}
-	}
-
-	c.cleanUpIntermediateFiles()
-	// log.Println("Coordinator done")
-	return true
+	return c.phase == endPhase
 }
 
 func (c *Coordinator) Register(args *TaskArgs, reply *RegisterReply) error {
@@ -108,6 +101,8 @@ func (c *Coordinator) Register(args *TaskArgs, reply *RegisterReply) error {
 	workerID := len(c.workers)
 	c.workers[workerID] = &worker{NoTask, -1, time.Now()}
 	reply.WorkerID = workerID
+	reply.NMap = len(c.mapTasks)
+	reply.NReduce = len(c.reduceTasks)
 	return nil
 }
 
@@ -141,8 +136,6 @@ func (c *Coordinator) RequestTask(args *TaskArgs, reply *TaskReply) error {
 		reply.TaskType = MapTask
 		reply.TaskID = taskID
 		reply.FileName = c.mapTasks[taskID].fileName
-		reply.NReduce = len(c.reduceTasks)
-		reply.NMap = len(c.mapTasks)
 	case reducePhase:
 		// reduce tasks
 		taskID := getTask(c.reduceTasks)
@@ -157,7 +150,6 @@ func (c *Coordinator) RequestTask(args *TaskArgs, reply *TaskReply) error {
 
 		reply.TaskType = ReduceTask
 		reply.TaskID = taskID
-		reply.NMap = len(c.mapTasks)
 	case endPhase:
 		reply.TaskType = End
 	}
@@ -168,6 +160,7 @@ func (c *Coordinator) RequestTask(args *TaskArgs, reply *TaskReply) error {
 func getTask(tasks map[int]*task) int {
 	for i, task := range tasks {
 		if task.status == idle {
+			task.status = running
 			return i
 		}
 	}
@@ -185,6 +178,7 @@ func (c *Coordinator) CompleteTask(args *TaskArgs, reply *struct{}) error {
 		c.mapTasks[worker.taskID].status = completed
 	case ReduceTask:
 		c.reduceTasks[worker.taskID].status = completed
+		c.cleanUpIntermediateFiles(worker.taskID)
 	case NoTask:
 		return nil
 	default:
@@ -227,8 +221,6 @@ func checkWorkerTimeout(c *Coordinator) {
 				}
 
 				worker.taskType = NoTask
-				worker.taskID = -1
-
 			}
 		}
 		c.mu.Unlock()
@@ -236,13 +228,11 @@ func checkWorkerTimeout(c *Coordinator) {
 	}
 }
 
-func (c *Coordinator) cleanUpIntermediateFiles() {
+func (c *Coordinator) cleanUpIntermediateFiles(reduceID int) {
 	for i := range len(c.mapTasks) {
-		for j := range len(c.reduceTasks) {
-			fname := fmt.Sprintf("mr-%d-%d", i, j)
-			if err := os.Remove(fname); err != nil && !os.IsNotExist(err) {
-				log.Printf("Error removing intermediate file %s: %v", fname, err)
-			}
+		fname := fmt.Sprintf("mr-%d-%d", i, reduceID)
+		if err := os.Remove(fname); err != nil && !os.IsNotExist(err) {
+			log.Printf("Error removing intermediate file %s: %v", fname, err)
 		}
 	}
 }

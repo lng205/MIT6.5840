@@ -13,6 +13,8 @@ import (
 
 type RegisterReply struct {
 	WorkerID int
+	NMap     int
+	NReduce  int
 }
 
 type TaskType int
@@ -33,9 +35,6 @@ type TaskReply struct {
 	TaskID   int
 
 	FileName string
-	NReduce  int
-
-	NMap int
 }
 
 // Cook up a unique-ish UNIX-domain socket name
